@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>모형로켓 시뮬레이터 (정밀 수식 개선판)</title>
+    <style>
+        body { font-family: 'Malgun Gothic', sans-serif; background-color: #f0f4f8; margin: 0; padding: 20px; }
+        .container { max-width: 1250px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); display: flex; gap: 20px; }
+        .left-panel { flex: 1.2; max-height: 80vh; overflow-y: auto; padding-right: 10px; }
+        .right-panel { flex: 1; display: flex; flex-direction: column; gap: 20px; }
+        h1 { font-size: 22px; color: #333; margin-top: 0; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        
+        .control-group { margin-bottom: 15px; }
+        select, button, input { padding: 8px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 6px; }
+        button { background-color: #007bff; color: white; border: none; cursor: pointer; transition: 0.2s; font-weight: bold; }
+        button:hover { background-color: #0056b3; }
+        
+        .part-card { background: #fdfdfd; border: 1px solid #e0e0e0; border-left: 5px solid #007bff; padding: 15px; margin-bottom: 15px; border-radius: 6px; position: relative; }
+        .part-card h3 { margin: 0 0 10px 0; font-size: 15px; color: #222; }
+        .delete-btn { position: absolute; top: 12px; right: 12px; background: #dc3545; font-size: 12px; padding: 5px 10px; }
+        .delete-btn:hover { background: #b02a37; }
+        
+        .input-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .input-item { display: flex; flex-direction: column; }
+        .input-item label { font-size: 11px; color: #555; margin-bottom: 4px; font-weight: 600; }
+        .input-item input { text-align: right; }
+        .highlight-label { color: #d63384 !important; font-weight: bold; }
+
+        .canvas-wrapper { background: #fafafa; border: 1px dashed #ccc; border-radius: 8px; padding: 10px; display: flex; justify-content: center; height: 480px; position: relative; }
+        canvas { background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+
+        .result-box { background: #e9ecef; padding: 20px; border-radius: 8px; text-align: center; }
+        .result-box h2 { margin: 0 0 15px 0; font-size: 18px; color: #333; }
+        .metrics { display: flex; justify-content: space-around; margin-bottom: 15px; }
+        .metric { font-size: 13px; color: #555; }
+        .metric span { display: block; font-size: 20px; font-weight: bold; color: #007bff; margin-top: 5px; }
+        
+        .status { padding: 12px; border-radius: 6px; font-weight: bold; font-size: 14px; }
+        .stable { background-color: #d1e7dd; color: #0f5132; border: 1px solid #badbcc; }
+        .unstable { background-color: #f8d7da; color: #842029; border: 1px solid #f5c2c7; }
+        .overstable { background-color: #fff3cd; color: #664d03; border: 1px solid #ffecb5; }
+        
+        .info-text { font-size: 12px; color: #666; margin-top: 10px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="left-panel">
+        <h1>🛠️ 부품 단위 및 치수 설정 (단위: mm, g)</h1>
+        <div class="control-group">
+            <select id="partType">
+                <option value="body">몸체 (바디튜브)</option>
+                <option value="nosecone">노즈콘</option>
+                <option value="fin">사다리꼴 날개</option>
+                <option value="motor">모터 (엔진)</option>
+            </select>
+            <button onclick="addPart()">+ 부품 추가</button>
+        </div>
+        <div id="partList"></div>
+    </div>
+
+    <div class="right-panel">
+        <div class="result-box">
+            <h2>비행 안정성 계산 결과 (Barrowman)</h2>
+            <div class="metrics">
+                <div class="metric">무게중심 (CG)<span id="resCG">0.0 mm</span></div>
+                <div class="metric">압력중심 (CP)<span id="resCP">0.0 mm</span></div>
+                <div class="metric">Caliber (안정도)<span id="resCaliber">0.00</span></div>
+            </div>
+            <div id="resStatus" class="status unstable">부품 데이터를 입력해주세요.</div>
+            <p class="info-text">* Caliber = (CG - CP) / 최대지름<br>* 일반적으로 1.0 ~ 2.0 사이면 안정적 비행이 가능합니다.</p>
+        </div>
+        
+        <div class="canvas-wrapper">
+            <canvas id="canvas" width="300" height="460"></canvas>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 레이블을 더 직관적으로 수정
+    const templates = {
+        'body': { name: '몸체 (바디튜브)', fields: { w: '무게 (g)', y: '하단부터 띄운 위치 (mm)', d: '지름 (mm)★', l: '길이 (mm)' }, defaults: { w: 40, y: 0, d: 30, l: 250 } },
+        'nosecone': { name: '노즈콘', fields: { w: '무게 (g)', y: '하단부터 띄운 위치 (mm)', d: '지름 (mm)★', l: '길이/높이 (mm)' }, defaults: { w: 15, y: 250, d: 30, l: 70 } },
+        'fin': { 
+            name: '사다리꼴 날개', 
+            fields: { 
+                w: '날개 세트 총무게 (g)', y: '날개 하단 위치 (mm)', 
+                count: '날개 개수 (개)', span: '한 쪽 날개만! 폭 (Span - mm)★', 
+                root: '뿌리 길이 (Cr - mm)', tip: '끝단 길이 (Ct - mm)', 
+                sweep: '후퇴 길이 (Sweep - mm)' 
+            }, 
+            defaults: { w: 10, y: 0, count: 4, span: 35, root: 50, tip: 20, sweep: 25 } 
+        },
+        'motor': { name: '모터 (엔진)', fields: { w: '모터 무게 (g)', y: '하단부터 띄운 위치 (mm)', d: '지름 (mm)', l: '길이 (mm)' }, defaults: { w: 40, y: -5, d: 18, l: 70 } }
+    };
+
+    let parts = [];
+    let uid = 0;
+    const ctx = document.getElementById('canvas').getContext('2d');
+
+    window.onload = () => {
+        add('body', templates.body.defaults);
+        add('nosecone', templates.nosecone.defaults);
+        add('fin', templates.fin.defaults);
+        add('motor', templates.motor.defaults); // 모터가 있어야 무게중심이 현실적으로 잡힘
+        renderUI();
+    };
+
+    function addPart() {
+        const type = document.getElementById('partType').value;
+        add(type, templates[type].defaults);
+        renderUI();
+    }
+
+    function add(type, data) { parts.push({ id: ++uid, type, ...data }); }
+
+    function removePart(id) { parts = parts.filter(p => p.id !== id); renderUI(); }
+
+    function updateValue(id, key, val) {
+        const part = parts.find(p => p.id === id);
+        if (part) { part[key] = parseFloat(val) || 0; calculate(); }
+    }
+
+    function renderUI() {
+        const list = document.getElementById('partList');
+        list.innerHTML = '';
+        
+        parts.forEach(p => {
+            const t = templates[p.type];
+            let html = `<div class="part-card">
+                <h3>${t.name}</h3>
+                <button class="delete-btn" onclick="removePart(${p.id})">삭제</button>
+                <div class="input-grid">`;
+            
+            for (let key in t.fields) {
+                const labelText = t.fields[key];
+                const isHighlight = labelText.includes('★'); 
+                const cleanLabel = labelText.replace('★', '');
+                
+                html += `
+                <div class="input-item">
+                    <label class="${isHighlight ? 'highlight-label' : ''}">${cleanLabel}</label>
+                    <input type="number" step="0.1" value="${p[key]}" oninput="updateValue(${p.id}, '${key}', this.value)">
+                </div>`;
+            }
+            html += `</div></div>`;
+            list.innerHTML += html;
+        });
+        calculate();
+    }
+
+    function calculate() {
+        let W = 0, sumCG = 0, maxD = 0.1, sumCP = 0, sumCN = 0;
+        let maxY = 100, minY = 0;
+
+        // 1. 최대 지름(기준 지름) 파악
+        parts.forEach(p => { if ((p.type === 'body' || p.type === 'nosecone') && p.d > maxD) maxD = p.d; });
+
+        parts.forEach(p => {
+            let cg = p.y, top = p.y;
+            
+            // 2. 부품별 무게중심(CG)
+            if (p.type === 'body') { cg = p.y + p.l / 2; top = p.y + p.l; }
+            if (p.type === 'nosecone') { cg = p.y + p.l * 0.4; top = p.y + p.l; }
+            if (p.type === 'motor') { cg = p.y + p.l / 2; top = p.y + p.l; }
+            if (p.type === 'fin') { cg = p.y + p.root * 0.4; top = p.y + p.root; }
+
+            W += p.w; sumCG += (p.w * cg);
+            if (top > maxY) maxY = top; if (p.y < minY) minY = p.y;
+
+            // 3. 압력중심(CP) 계산 (Barrowman 수식)
+            if (p.type === 'nosecone') {
+                let cn = 2.0;
+                let cp = p.y + p.l * 0.466; // Ogive 기준
+                sumCN += cn; sumCP += (cn * cp);
+            } 
+            if (p.type === 'fin') {
+                const R = maxD / 2;
+                const cr = p.root, ct = p.tip, s = p.span, sw = p.sweep, N = p.count;
+                
+                const KFB = 1 + (R / (R + s));
+                const Lc = Math.sqrt(Math.pow(s, 2) + Math.pow(sw + ct/2 - cr/2, 2));
+                
+                // 분모가 0이 되는 것 방지
+                const sumC = cr + ct > 0.1 ? cr + ct : 0.1; 
+                const term = 1 + Math.sqrt(1 + Math.pow(2 * Lc / sumC, 2));
+                
+                let cn = KFB * (4 * N * Math.pow(s / maxD, 2)) / term;
+                
+                let xf = (sw / 3) * (cr + 2*ct) / sumC + (1/6) * (cr + ct - (cr*ct)/sumC);
+                let cp = (p.y + cr) - xf; // 절대 좌표계로 변환 (아래가 0)
+                
+                sumCN += cn; sumCP += (cn * cp);
+            }
+        });
+
+        const CG = W > 0 ? sumCG / W : 0;
+        const CP = sumCN > 0 ? sumCP / sumCN : 0;
+        const caliber = (maxD > 0 && sumCN > 0) ? (CG - CP) / maxD : 0;
+
+        document.getElementById('resCG').innerText = CG.toFixed(1) + ' mm';
+        document.getElementById('resCP').innerText = CP.toFixed(1) + ' mm';
+        document.getElementById('resCaliber').innerText = caliber.toFixed(2);
+
+        const statusEl = document.getElementById('resStatus');
+        if (parts.length === 0) {
+            statusEl.className = 'status unstable'; statusEl.innerText = '부품이 없습니다.';
+        } else if (caliber < 1.0) {
+            statusEl.className = 'status unstable'; statusEl.innerText = '🚨 불안정 (Caliber < 1.0) - CP가 너무 높거나 CG가 너무 낮습니다.';
+        } else if (caliber <= 2.0) {
+            statusEl.className = 'status stable'; statusEl.innerText = '✅ 안정 (1.0 ~ 2.0) - 이상적인 비행 설계입니다.';
+        } else {
+            statusEl.className = 'status overstable'; statusEl.innerText = '⚠️ 과도안정 (Caliber > 2.0) - 바람에 취약합니다 (웨더코킹)';
+        }
+
+        draw(maxY, minY, CG, CP, maxD);
+    }
+
+    function draw(maxY, minY, cg, cp, maxD) {
+        const cvs = document.getElementById('canvas');
+        ctx.clearRect(0, 0, cvs.width, cvs.height);
+        
+        const pad = 35;
+        const H = maxY - minY + pad * 2;
+        const scale = Math.min((cvs.height - pad*2) / H, 1.8);
+        const cx = cvs.width / 2;
+        const baseY = cvs.height - pad + (minY * scale);
+        
+        const tY = (y) => baseY - (y * scale);
+        const bR = (maxD / 2) * scale;
+
+        ctx.fillStyle = '#666';
+        parts.filter(p => p.type === 'motor').forEach(p => {
+            let w = p.d * scale, h = p.l * scale;
+            ctx.fillRect(cx - w/2, tY(p.y + p.l), w, h);
+        });
+
+        ctx.fillStyle = 'rgba(0, 123, 255, 0.7)';
+        ctx.strokeStyle = '#0056b3';
+        ctx.lineWidth = 1;
+        parts.filter(p => p.type === 'fin').forEach(p => {
+            let cr = p.root * scale, ct = p.tip * scale, sw = p.sweep * scale, s = p.span * scale;
+            let y_rt_top = tY(p.y + p.root), y_rt_bot = tY(p.y);
+            let y_tp_top = tY(p.y + p.root - p.sweep), y_tp_bot = tY(p.y + p.root - p.sweep - p.tip);
+
+            ctx.beginPath();
+            ctx.moveTo(cx - bR, y_rt_top); ctx.lineTo(cx - bR - s, y_tp_top);
+            ctx.lineTo(cx - bR - s, y_tp_bot); ctx.lineTo(cx - bR, y_rt_bot);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(cx + bR, y_rt_top); ctx.lineTo(cx + bR + s, y_tp_top);
+            ctx.lineTo(cx + bR + s, y_tp_bot); ctx.lineTo(cx + bR, y_rt_bot);
+            ctx.closePath(); ctx.fill(); ctx.stroke();
+        });
+
+        ctx.fillStyle = '#f8f9fa';
+        ctx.strokeStyle = '#adb5bd';
+        parts.filter(p => p.type === 'body').forEach(p => {
+            let w = p.d * scale, h = p.l * scale;
+            ctx.fillRect(cx - w/2, tY(p.y + p.l), w, h);
+            ctx.strokeRect(cx - w/2, tY(p.y + p.l), w, h);
+        });
+
+        ctx.fillStyle = '#dc3545';
+        parts.filter(p => p.type === 'nosecone').forEach(p => {
+            let w = p.d * scale, h = p.l * scale;
+            let topY = tY(p.y + p.l), botY = tY(p.y);
+            ctx.beginPath();
+            ctx.moveTo(cx - w/2, botY);
+            ctx.quadraticCurveTo(cx - w/2, topY, cx, topY);
+            ctx.quadraticCurveTo(cx + w/2, topY, cx + w/2, botY);
+            ctx.closePath(); ctx.fill();
+        });
+
+        const drawMarker = (y, color, text) => {
+            let py = tY(y);
+            ctx.beginPath(); ctx.arc(cx, py, 6, 0, Math.PI*2);
+            ctx.fillStyle = color; ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+            ctx.fillStyle = color; ctx.font = 'bold 12px Arial';
+            ctx.fillText(text, cx + 12, py + 4);
+        };
+
+        if (W > 0) drawMarker(cg, '#0d6efd', 'CG'); 
+        if (sumCN > 0) drawMarker(cp, '#dc3545', 'CP'); 
+        
+        ctx.strokeStyle = '#999'; ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(0, baseY); ctx.lineTo(cvs.width, baseY); ctx.stroke();
+        ctx.setLineDash([]); ctx.fillStyle = '#666'; ctx.font = '11px Arial';
+        ctx.fillText('0mm (바디 하단)', 5, baseY - 5);
+    }
+</script>
+
+</body>
+</html>
